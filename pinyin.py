@@ -1,4 +1,4 @@
-from pypinyin import lazy_pinyin, Style
+from pypinyin import lazy_pinyin, Style, pinyin_dict
 from Pinyin2Hanzi import DefaultHmmParams, viterbi
 import re
 import math
@@ -15,10 +15,8 @@ logger = logging.getLogger(__name__)
 
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
-        """
-        :param user_id: 用户唯一标识（哈希处理）
-        :param enable_learning: 是否启用学习功能（默认开启）
-        """
+        #:param user_id: 用户唯一标识（哈希处理）
+        #:param enable_learning: 是否启用学习功能（默认开启）
         self.hmm_params = self._load_enhanced_hmm('training_data.txt')  # 指定训练数据路径
         self.pinyin_pattern = re.compile(r'^[a-z]+( [a-z]+)*$')  # 更严格的拼音正则
         self._cache = {}
@@ -27,9 +25,57 @@ class PinyinConverter:
         self.user_dict = self._load_user_dict(user_id)
         self.privacy_lock = threading.Lock()  # 线程安全锁
         jieba.initialize()
+        jieba.load_userdict('pinyin_dict.txt')
+
+    def init_universal_emission(self):
+        universal_emit = defaultdict(lambda: defaultdict(float))
+        # 加载pypinyin内置的13万条拼音汉字映射
+        for hanzi, pinyins in pinyin_dict.pinyin_dict.items():
+            weight = 1.0 / len(pinyins)  # 平均分配初始概率
+            for py in pinyins:
+                universal_emit[py][hanzi] = math.log(weight)
+        return universal_emit
+
+    def _load_enhanced_hmm(self, train_file: str):
+        params = DefaultHmmParams()
+        # 获取统计结果
+        trans_counts, emit_counts = self._train_transition_probs(train_file)
+        # 初始化全量汉字节点
+        all_chars = set()
+        for context in trans_counts:
+            if isinstance(context, tuple):
+                all_chars.update(context)
+            else:
+                all_chars.add(context)
+            all_chars.update(trans_counts[context].keys())
+
+        # 初始化所有可能状态的转移概率
+        for char in all_chars:
+            params.transition_dict.setdefault(char, {})
+
+        # 处理转移概率（二元+三元）
+        for context, next_chars in trans_counts.items():
+            total = sum(next_chars.values()) + 1e-5  # 平滑处理
+            if isinstance(context, tuple):  # 三元上下文
+                params.transition_dict.setdefault(context, {})
+                for char, count in next_chars.items():
+                    params.transition_dict[context][char] = math.log(count / total)
+            else:  # 二元上下文
+                for char, count in next_chars.items():
+                    params.transition_dict[context][char] = math.log(count / total)
+
+        # 处理发射概率
+        for py in emit_counts:
+            total = sum(emit_counts[py].values()) + 1e-5
+            params.emission_dict[py] = {
+                char: math.log((count + 1e-5) / total)  # 加1平滑
+                for char, count in emit_counts[py].items()
+            }
+        universal_emit = self.init_universal_emission()  # 获取拼音到汉字的初始发射概率
+        params.emission_dict.update(universal_emit)  # 合并内置拼音汉字发射概率
+        return params
 
     def _split_pinyin(self, pinyin_text: str) -> List[str]:
-        """ 使用jieba代替原来的segmenter """
         try:
             # 使用jieba的精确模式分割
             return list(jieba.cut(pinyin_text, cut_all=False))
@@ -38,7 +84,7 @@ class PinyinConverter:
             return self._heuristic_segment(pinyin_text)  # 降级策略
 
     def _load_user_dict(self, user_id: Optional[str]) -> dict:
-        """安全加载用户词典"""
+             #加载用户词典
         if not user_id or not self.enable_learning:
             return defaultdict(list)
 
@@ -51,7 +97,7 @@ class PinyinConverter:
             return defaultdict(list)
 
     def _save_user_dict(self):
-        """加密保存用户词典"""
+        #加密保存用户词典
         if not self.user_id or not self.enable_learning:
             return
 
@@ -61,7 +107,7 @@ class PinyinConverter:
                 json.dump(self.user_dict, f, ensure_ascii=False)
 
     def update_learning_setting(self, enable: bool):
-        """隐私设置开关"""
+        #隐私设置开关
         with self.privacy_lock:
             old_setting = self.enable_learning
             self.enable_learning = enable
@@ -71,7 +117,7 @@ class PinyinConverter:
                 self.user_dict.clear()
 
     def _update_user_model(self, pinyin: str, selected_text: str):
-        """安全更新用户模型"""
+        #安全更新用户模型
         if not self.enable_learning:
             return
 
@@ -84,51 +130,59 @@ class PinyinConverter:
                 self.user_dict[pinyin] = entries[:10]  # 保留前10个
                 self._save_user_dict()
 
-    def _load_enhanced_hmm(self, train_file: str):
-        """ 从训练数据中学习HMM参数 """
-        params = DefaultHmmParams()
-
-        # 从训练文件统计转移概率
-        transition_counts = self._train_transition_probs(train_file)
-
-        # 转换计数为对数概率
-        for current_char, next_chars in transition_counts.items():
-            total = sum(next_chars.values())
-            # 使用拉普拉斯平滑避免零概率
-            for next_char in next_chars:
-                next_chars[next_char] += 1
-                total += 1
-            # 更新HMM参数
-            params.transition_dict[current_char] = {
-                next_char: math.log(count / total)
-                for next_char, count in next_chars.items()
-            }
-        return params
 
     def _train_transition_probs(self, file_path: str):
-        """ 统计汉字转移频次 """
         transition_counts = defaultdict(lambda: defaultdict(int))
+        emission_counts = defaultdict(lambda: defaultdict(int))
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                text = re.sub(r'\s+', '', f.read())  # 移除所有空白字符
-                text = re.sub(r'[^\u4e00-\u9fff]', '', text)  # 只保留汉字
+                raw_text = f.read()
+                # 文本清洗
+                clean_text = re.sub(r'[^\u4e00-\u9fff，。！？、\n]', '', raw_text)
+                clean_text = clean_text.replace('\n', '')  # 保留换行符用于分段
 
-                # 统计相邻汉字转移
-                for i in range(len(text) - 1):
-                    current = text[i]
-                    next_char = text[i + 1]
-                    transition_counts[current][next_char] += 1
-        except FileNotFoundError:
-            logger.warning(f"训练文件 {file_path} 未找到，使用默认HMM参数")
-        return transition_counts
+                # 分段处理增强鲁棒性
+                paragraphs = [p for p in clean_text.split('，') if p]
 
+                for para in paragraphs:
+                    # 生成有效拼音序列
+                    pinyin_seq = lazy_pinyin(para, style=Style.NORMAL, errors=lambda x: [''])
+                    hanzi_seq = list(para)
+
+                    # 严格对齐处理
+                    valid_pairs = []
+                    for hz, py in zip(hanzi_seq, pinyin_seq):
+                        if py:  # 拼音非空时保留
+                            valid_pairs.append((hz, py))
+
+                    # 统计发射概率
+                    for hz, py in valid_pairs:
+                        emission_counts[py][hz] += 1
+
+                    # 统计转移概率（修正索引范围）
+                    hanzi_list = [p[0] for p in valid_pairs]
+                    for i in range(len(hanzi_list)):
+                        # 二元转移
+                        if i > 0:
+                            prev = hanzi_list[i - 1]
+                            curr = hanzi_list[i]
+                            transition_counts[prev][curr] += 1
+                        # 三元转移
+                        if i > 1:
+                            context = (hanzi_list[i - 2], hanzi_list[i - 1])
+                            transition_counts[context][hanzi_list[i]] += 1
+
+        except Exception as e:
+            logger.error(f"训练数据加载失败: {str(e)}")
+        return transition_counts, emission_counts
     def _init_fallback_strategy(self):
-        """ 初始化降级策略资源 """
+        #初始化降级策略资源
         from pypinyin import pinyin
         self.fallback_pinyin = pinyin
 
     def is_valid_pinyin(self, text: str) -> bool:
-        """ 增强版输入验证 """
+        #增强版输入验证
         if not text:
             return False
         # 允许空格分隔但需符合规范
@@ -166,7 +220,7 @@ class PinyinConverter:
                 self._cache[pinyin_text] = results
 
     def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
-        """应用用户个性化排序"""
+        #应用用户个性化排序
         user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
 
         # 提升用户偏好项的得分
@@ -177,7 +231,7 @@ class PinyinConverter:
         return sorted(results, key=lambda x: -x['score'])
 
     def _heuristic_segment(self, pinyin_text: str) -> List[str]:
-        """ 基于常见音节的分割（可扩展） """
+        #基于常见音节的分割
         common_syllables = {'zh', 'ch', 'sh', 'ang', 'eng', 'ing'}
         segments = []
         i = 0
@@ -196,18 +250,20 @@ class PinyinConverter:
         return segments
 
     def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
-        """ 带上下文的多音字解码 """
+        #带上下文的多音字解码
         # 将上下文转换为拼音特征
         context_pinyins = lazy_pinyin(context) if context else []
+        print(context_pinyins)
+        print(pinyin_list)
         return viterbi(
-            pinyin_list=context_pinyins + pinyin_list,  # 组合上下文
             hmm_params=self.hmm_params,
+            observations=context_pinyins + pinyin_list, # 组合上下文
             path_num=20,  # 获取更多候选
-            log_prob=True
+            log=True
         )
 
     def _fallback_strategy(self, pinyin_text: str) -> List[Dict]:
-        """ 降级策略：整词匹配 """
+        #降级策略：整词匹配
         try:
             # 获取所有可能的汉字组合
             candidates = self.fallback_pinyin(
@@ -220,25 +276,44 @@ class PinyinConverter:
             return [{"text": pinyin_text, "score": 0.0}]
 
     def _post_process(self, results: List[Dict], top_k: int) -> List[Dict]:
-        """ 后处理：去重、排序、截断 """
+        """ 改进的后处理方法 """
+        processed = []
         seen = set()
-        unique_results = []
-        for res in sorted(results, key=lambda x: -x['score']):
-            text = res['text']
-            if text not in seen:
-                seen.add(text)
-                unique_results.append(res)
-        return unique_results[:top_k]
 
+        for path in results:
+            try:
+                # 将拼音路径转换为汉字
+                hanzi_sequence = []
+                for py in path.path:
+                    # 获取该拼音最可能的汉字
+                    if py in self.hmm_params.emission_dict:
+                        char = max(self.hmm_params.emission_dict[py].items(),
+                                   key=lambda x: x[1])[0]
+                    else:
+                        # 如果拼音不在训练数据发射字典中，则使用内置拼音库的候选
+                        char = self.fallback_pinyin(py)[0][0] if self.fallback_pinyin(py) else '?'
+                    hanzi_sequence.append(char)
+
+                text = ''.join(hanzi_sequence)
+                if text not in seen:
+                    seen.add(text)
+                    processed.append({
+                        'text': text,
+                        'score': math.exp(path.score)
+                    })
+            except Exception as e:
+                logger.error(f"处理路径失败: {str(e)}")
+
+        return sorted(processed, key=lambda x: -x['score'])[:top_k]
 class PrivacyController:
     @staticmethod
     def anonymize_input(text: str) -> str:
-        """数据脱敏处理"""
+        #数据脱敏处理
         return hashlib.sha256(text.encode()).hexdigest()
 
     @staticmethod
     def encrypt_data(data: dict, key: bytes) -> bytes:
-        """AES加密用户数据"""
+        #AES加密用户数据
         # 实现实际的加密逻辑（示例）
         from Crypto.Cipher import AES
         cipher = AES.new(key, AES.MODE_EAX)
@@ -248,7 +323,7 @@ class PrivacyController:
 
     @classmethod
     def create_consent_dialog(cls):
-        """生成隐私协议对话框（伪代码）"""
+        #生成隐私协议对话框
         print("""
         隐私保护声明：
         1. 用户输入数据仅用于改进输入体验
@@ -258,6 +333,7 @@ class PrivacyController:
         """)
         choice = input().strip().lower()
         return choice == 'y'
+
 if __name__ == "__main__":
     # 用户首次使用
     user_id = "user@example.com"  # 实际应使用不可逆哈希值
@@ -269,11 +345,14 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    result = converter.convert("zhangsan")
+    result = converter.convert("xiwang")
     print(result)
-
+    # 检查xue的发射概率
+    print("xi的候选:", converter.hmm_params.emission_dict.get('xi', {}))
+    print("wang的候选:", converter.hmm_params.emission_dict.get('wang', {}))
+    # 应输出: {'学': -1.2039, '雪': -2.3025} (近似值)
+    # 检查转移概率
+    print("希望转移概率:", converter.hmm_params.transition_dict['希'].get('望', 0))
+    # 应存在非零概率
     # 用户选择后更新设置
     converter.update_learning_setting(False)  # 关闭学习
-
-    # 查看隐私数据（示例）
-    print("脱敏后的用户输入示例:", PrivacyController.anonymize_input("张三"))
