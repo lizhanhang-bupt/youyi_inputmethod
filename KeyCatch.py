@@ -29,13 +29,45 @@ class KeyboardCaptureWindow(QWidget):
         self.textEdit.insertPlainText(f'{key_name}')
 
     def getKeyName(self, key):
-        if key == Qt.Key_A:
-            return 'A'
-        elif key == Qt.Key_B:
-            return 'B'
-        # 添加其他键的处理逻辑
-        else:
-            return f'Key {key}'
+        key_map = {
+            Qt.Key_A: 'A',
+            Qt.Key_B: 'B',
+            Qt.Key_C: 'C',
+            Qt.Key_D: 'D',
+            Qt.Key_E: 'E',
+            Qt.Key_F: 'F',
+            Qt.Key_G: 'G',
+            Qt.Key_H: 'H',
+            Qt.Key_I: 'I',
+            Qt.Key_J: 'J',
+            Qt.Key_K: 'K',
+            Qt.Key_L: 'L',
+            Qt.Key_M: 'M',
+            Qt.Key_N: 'N',
+            Qt.Key_O: 'O',
+            Qt.Key_P: 'P',
+            Qt.Key_Q: 'Q',
+            Qt.Key_R: 'R',
+            Qt.Key_S: 'S',
+            Qt.Key_T: 'T',
+            Qt.Key_U: 'U',
+            Qt.Key_V: 'V',
+            Qt.Key_W: 'W',
+            Qt.Key_X: 'X',
+            Qt.Key_Y: 'Y',
+            Qt.Key_Z: 'Z',
+            Qt.Key_0: '0',
+            Qt.Key_1: '1',
+            Qt.Key_2: '2',
+            Qt.Key_3: '3',
+            Qt.Key_4: '4',
+            Qt.Key_5: '5',
+            Qt.Key_6: '6',
+            Qt.Key_7: '7',
+            Qt.Key_8: '8',
+            Qt.Key_9: '9',
+        }
+        return key_map.get(key)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
