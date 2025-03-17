@@ -25,7 +25,30 @@ class PinyinConverter:
         self.user_dict = self._load_user_dict(user_id)
         self.privacy_lock = threading.Lock()  # 线程安全锁
         jieba.initialize()
-        jieba.load_userdict('pinyin_dict.txt')
+        #jieba.load_userdict('pinyin_dict.txt') # 初始化jieba并加载所有拼音音节
+        seen_pinyin = set()
+        for pinyins in pinyin_dict.pinyin_dict.values():
+            for py in pinyins:
+                py_normalized = re.sub(r'\d', '', py)
+                if py_normalized not in seen_pinyin:
+                    jieba.add_word(py_normalized, freq=1000)
+                    seen_pinyin.add(py_normalized)
+
+        # 构建首字母映射
+        self.initial_to_pys = defaultdict(list)
+        for py in self.hmm_params.emission_dict.keys():
+            initial = self._get_initial(py)
+            self.initial_to_pys[initial].append(py)
+
+    def _get_initial(self, py: str) -> str:
+        """获取拼音的首字母"""
+        if py.startswith('zh'):
+            return 'z'
+        elif py.startswith('ch'):
+            return 'c'
+        elif py.startswith('sh'):
+            return 's'
+        return py[0] if py else ''
 
     def init_universal_emission(self):
         universal_emit = defaultdict(lambda: defaultdict(float))
@@ -77,11 +100,32 @@ class PinyinConverter:
 
     def _split_pinyin(self, pinyin_text: str) -> List[str]:
         try:
-            # 使用jieba的精确模式分割
-            return list(jieba.cut(pinyin_text, cut_all=False))
+            return list(jieba.cut(pinyin_text.replace(' ', ''), cut_all=False))
         except Exception as e:
             logger.error(f"分词失败: {str(e)}")
-            return self._heuristic_segment(pinyin_text)  # 降级策略
+            return self._heuristic_segment(pinyin_text)
+
+    def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
+        """处理含单字母的拼音输入"""
+        char_probs = defaultdict(float)
+        for syllable in pinyin_list:
+            if len(syllable) != 1:
+                continue
+            initial = syllable.lower()
+            for py in self.initial_to_pys.get(initial, []):
+                for char, log_prob in self.hmm_params.emission_dict.get(py, {}).items():
+                    if log_prob > char_probs.get(char, -float('inf')):
+                        char_probs[char] = log_prob
+
+        # 转换为结果并排序
+        sorted_chars = sorted(char_probs.items(), key=lambda x: -x[1])
+        seen = set()
+        results = []
+        for char, log_prob in sorted_chars:
+            if char not in seen:
+                seen.add(char)
+                results.append({'text': char, 'score': math.exp(log_prob)})
+        return results[:top_k]
 
     def _load_user_dict(self, user_id: Optional[str]) -> dict:
              #加载用户词典
@@ -189,9 +233,8 @@ class PinyinConverter:
         return self.pinyin_pattern.match(text.strip()) is not None
 
     def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
-        results = []  # 初始化results变量
         pinyin_text = pinyin_text.strip().replace(' ', '')
-
+        results=[]
         if not self.is_valid_pinyin(pinyin_text):
             logger.warning(f"非法拼音输入: {pinyin_text}")
             return []
@@ -201,22 +244,23 @@ class PinyinConverter:
 
         try:
             pinyin_list = self._split_pinyin(pinyin_text)
-            raw_results = self._viterbi_decode(pinyin_list, context)
-            results = self._post_process(raw_results, top_k) if raw_results else []
+            # 检查是否含有单字母
+            if any(len(py) == 1 for py in pinyin_list):
+                results = self._handle_single_letter(pinyin_list, top_k)
+            else:
+                raw_results = self._viterbi_decode(pinyin_list, context)
+                results = self._post_process(raw_results, top_k) if raw_results else []
 
+            # 应用用户词典
             if self.enable_learning and pinyin_text in self.user_dict:
                 results = self._apply_user_preference(results, pinyin_text)
 
-            if not results:
-                results = self._fallback_strategy(pinyin_text)
-
             return results
         except Exception as e:
-            logger.error(f"转换失败: {str(e)}", exc_info=True)
-            results = self._fallback_strategy(pinyin_text)
-            return results
+            logger.error(f"转换失败: {str(e)}")
+            return self._fallback_strategy(pinyin_text)
         finally:
-            if results:  # 只有当results被赋值时才缓存
+            if results:
                 self._cache[pinyin_text] = results
 
     def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
@@ -353,6 +397,8 @@ if __name__ == "__main__":
     # 应输出: {'学': -1.2039, '雪': -2.3025} (近似值)
     # 检查转移概率
     print("希望转移概率:", converter.hmm_params.transition_dict['希'].get('望', 0))
-    # 应存在非零概率
-    # 用户选择后更新设置
+
+    print(converter.convert("xiwang"))  # 应优先返回"希望"
+    # 测试单字母输入
+    print(converter.convert("y"))  # 返回所有x开头的汉字
     converter.update_learning_setting(False)  # 关闭学习
