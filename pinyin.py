@@ -59,6 +59,116 @@ class PinyinConverter:
                 universal_emit[py][hanzi] = math.log(weight)
         return universal_emit
 
+    def _split_pinyin(self, pinyin_text: str) -> List[str]:
+        pinyin_clean = pinyin_text.replace(' ', '')
+        try:
+            # 强制精确模式且不启用HMM
+            segments = list(jieba.cut(pinyin_clean, cut_all=False, HMM=False))
+
+            # 验证逻辑：检查无调拼音是否存在于发射词典
+            valid = all(
+                re.sub(r'\d+', '', seg) in self.hmm_params.emission_dict  # 关键修正
+                for seg in segments
+            )
+            if valid:
+                return segments
+            else:
+                logger.warning(f"无效音节: {segments} -> 触发启发式分割")
+                return self._heuristic_segment(pinyin_clean)
+        except Exception as e:
+            logger.error(f"Jieba分词失败: {e}")
+            return self._heuristic_segment(pinyin_clean)
+
+    def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
+        """处理含单字母的拼音输入"""
+        char_probs = defaultdict(float)
+        for syllable in pinyin_list:
+            if len(syllable) != 1:
+                continue
+            initial = syllable.lower()
+            for py in self.initial_to_pys.get(initial, []):
+                for char, log_prob in self.hmm_params.emission_dict.get(py, {}).items():
+                    if log_prob > char_probs.get(char, -float('inf')):
+                        char_probs[char] = log_prob
+
+        # 转换为结果并排序
+        sorted_chars = sorted(char_probs.items(), key=lambda x: -x[1])
+        seen = set()
+        results = []
+        for char, log_prob in sorted_chars:
+            if char not in seen:
+                seen.add(char)
+                results.append({'text': char, 'score': math.exp(log_prob)})
+        return results[:top_k]
+
+    def _heuristic_segment(self, pinyin_text: str) -> List[str]:
+        """动态规划优先匹配最长有效音节"""
+        n = len(pinyin_text)
+        max_len = 6  # 最长合法拼音长度
+
+        # 初始化DP表：dp[i] = (max_score, best_segmentation)
+        dp = [(-float('inf'), []) for _ in range(n + 1)]
+        dp[0] = (0, [])
+
+        # 预加载所有无调拼音
+        valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
+
+        for i in range(1, n + 1):
+            # 从最长可能开始尝试
+            for j in range(max(0, i - max_len), i):
+                current = pinyin_text[j:i]
+                current_clean = re.sub(r'\d+', '', current)
+
+                # 计算得分：多音节优先
+                score = 0
+                if current_clean in valid_pys:
+                    score = len(current_clean) * 2  # 长度越长得分越高
+
+                # 更新最佳路径
+                if dp[j][0] + score > dp[i][0]:
+                    dp[i] = (dp[j][0] + score, dp[j][1] + [current])
+
+        # 获取最佳分割
+        best_seg = dp[n][1] if dp[n][1] else []
+
+        # 保底策略：整词匹配（未来扩展用）
+        if pinyin_text in valid_pys:
+            return [pinyin_text]
+
+        return best_seg if best_seg else list(pinyin_text)
+
+    def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
+        pinyin_text = pinyin_text.strip().replace(' ', '')
+        results = []
+
+        if not self.is_valid_pinyin(pinyin_text):
+            logger.warning(f"非法拼音输入: {pinyin_text}")
+            return []
+
+        if pinyin_text in self._cache:
+            return self._cache[pinyin_text]
+
+        try:
+            pinyin_list = self._split_pinyin(pinyin_text)
+
+            if all(len(py) == 1 for py in pinyin_list):
+                results = self._handle_single_letter(pinyin_list, top_k)
+            else:
+                raw_results = self._viterbi_decode(pinyin_list, context)
+                results = self._post_process(raw_results, top_k) if raw_results else []
+
+            if self.enable_learning and pinyin_text in self.user_dict:
+                results = self._apply_user_preference(results, pinyin_text)
+
+            return results
+        except Exception as e:
+            logger.error(f"转换失败: {str(e)}")
+            return self._fallback_strategy(pinyin_text)
+        finally:
+            # Cache the results to improve future lookup
+            if results:
+                self._cache[pinyin_text] = results
+
     def _load_enhanced_hmm(self, train_file: str):
         params = DefaultHmmParams()
         # 获取统计结果
@@ -98,34 +208,74 @@ class PinyinConverter:
         params.emission_dict.update(universal_emit)  # 合并内置拼音汉字发射概率
         return params
 
-    def _split_pinyin(self, pinyin_text: str) -> List[str]:
+    def _train_transition_probs(self, file_path: str):
+        transition_counts = defaultdict(lambda: defaultdict(int))
+        emission_counts = defaultdict(lambda: defaultdict(int))
+    #训练，数据预处理
         try:
-            return list(jieba.cut(pinyin_text.replace(' ', ''), cut_all=False))
+            with open(file_path, 'r', encoding='utf-8') as f:
+                raw_text = f.read()
+                # 文本清洗
+                clean_text = re.sub(r'[^\u4e00-\u9fff，。！？、\n]', '', raw_text)
+                clean_text = clean_text.replace('\n', '')  # 保留换行符用于分段
+
+                # 分段处理增强鲁棒性
+                paragraphs = [p for p in clean_text.split('，') if p]
+
+                for para in paragraphs:
+                    # 生成有效拼音序列
+                    pinyin_seq = lazy_pinyin(para, style=Style.NORMAL, errors=lambda x: [''])
+                    hanzi_seq = list(para)
+
+                    # 严格对齐处理
+                    valid_pairs = []
+                    for hz, py in zip(hanzi_seq, pinyin_seq):
+                        if py:  # 拼音非空时保留
+                            valid_pairs.append((hz, py))
+
+                    # 统计发射概率
+                    for hz, py in valid_pairs:
+                        emission_counts[py][hz] += 1
+
+                    # 统计转移概率（修正索引范围）
+                    hanzi_list = [p[0] for p in valid_pairs]
+                    for i in range(len(hanzi_list)):
+                        # 二元转移
+                        if i > 0:
+                            prev = hanzi_list[i - 1]
+                            curr = hanzi_list[i]
+                            transition_counts[prev][curr] += 1
+                        # 三元转移
+                        if i > 1:
+                            context = (hanzi_list[i - 2], hanzi_list[i - 1])
+                            transition_counts[context][hanzi_list[i]] += 1
+
         except Exception as e:
-            logger.error(f"分词失败: {str(e)}")
-            return self._heuristic_segment(pinyin_text)
+            logger.error(f"训练数据加载失败: {str(e)}")
+        return transition_counts, emission_counts
 
-    def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
-        """处理含单字母的拼音输入"""
-        char_probs = defaultdict(float)
-        for syllable in pinyin_list:
-            if len(syllable) != 1:
-                continue
-            initial = syllable.lower()
-            for py in self.initial_to_pys.get(initial, []):
-                for char, log_prob in self.hmm_params.emission_dict.get(py, {}).items():
-                    if log_prob > char_probs.get(char, -float('inf')):
-                        char_probs[char] = log_prob
+    def _init_fallback_strategy(self):
+        #初始化降级策略资源
+        from pypinyin import pinyin
+        self.fallback_pinyin = pinyin
 
-        # 转换为结果并排序
-        sorted_chars = sorted(char_probs.items(), key=lambda x: -x[1])
-        seen = set()
-        results = []
-        for char, log_prob in sorted_chars:
-            if char not in seen:
-                seen.add(char)
-                results.append({'text': char, 'score': math.exp(log_prob)})
-        return results[:top_k]
+    def is_valid_pinyin(self, text: str) -> bool:
+        #增强版输入验证
+        if not text:
+            return False
+        # 允许空格分隔但需符合规范
+        return self.pinyin_pattern.match(text.strip()) is not None
+
+    def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
+        #应用用户个性化排序
+        user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
+
+        # 提升用户偏好项的得分
+        for res in results:
+            if res['text'] in user_entries:
+                res['score'] *= user_entries[res['text']] * 2  # 权重加倍
+
+        return sorted(results, key=lambda x: -x['score'])
 
     def _load_user_dict(self, user_id: Optional[str]) -> dict:
              #加载用户词典
@@ -174,125 +324,6 @@ class PinyinConverter:
                 self.user_dict[pinyin] = entries[:10]  # 保留前10个
                 self._save_user_dict()
 
-
-    def _train_transition_probs(self, file_path: str):
-        transition_counts = defaultdict(lambda: defaultdict(int))
-        emission_counts = defaultdict(lambda: defaultdict(int))
-
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                raw_text = f.read()
-                # 文本清洗
-                clean_text = re.sub(r'[^\u4e00-\u9fff，。！？、\n]', '', raw_text)
-                clean_text = clean_text.replace('\n', '')  # 保留换行符用于分段
-
-                # 分段处理增强鲁棒性
-                paragraphs = [p for p in clean_text.split('，') if p]
-
-                for para in paragraphs:
-                    # 生成有效拼音序列
-                    pinyin_seq = lazy_pinyin(para, style=Style.NORMAL, errors=lambda x: [''])
-                    hanzi_seq = list(para)
-
-                    # 严格对齐处理
-                    valid_pairs = []
-                    for hz, py in zip(hanzi_seq, pinyin_seq):
-                        if py:  # 拼音非空时保留
-                            valid_pairs.append((hz, py))
-
-                    # 统计发射概率
-                    for hz, py in valid_pairs:
-                        emission_counts[py][hz] += 1
-
-                    # 统计转移概率（修正索引范围）
-                    hanzi_list = [p[0] for p in valid_pairs]
-                    for i in range(len(hanzi_list)):
-                        # 二元转移
-                        if i > 0:
-                            prev = hanzi_list[i - 1]
-                            curr = hanzi_list[i]
-                            transition_counts[prev][curr] += 1
-                        # 三元转移
-                        if i > 1:
-                            context = (hanzi_list[i - 2], hanzi_list[i - 1])
-                            transition_counts[context][hanzi_list[i]] += 1
-
-        except Exception as e:
-            logger.error(f"训练数据加载失败: {str(e)}")
-        return transition_counts, emission_counts
-    def _init_fallback_strategy(self):
-        #初始化降级策略资源
-        from pypinyin import pinyin
-        self.fallback_pinyin = pinyin
-
-    def is_valid_pinyin(self, text: str) -> bool:
-        #增强版输入验证
-        if not text:
-            return False
-        # 允许空格分隔但需符合规范
-        return self.pinyin_pattern.match(text.strip()) is not None
-
-    def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
-        pinyin_text = pinyin_text.strip().replace(' ', '')
-        results=[]
-        if not self.is_valid_pinyin(pinyin_text):
-            logger.warning(f"非法拼音输入: {pinyin_text}")
-            return []
-
-        if pinyin_text in self._cache:
-            return self._cache[pinyin_text]
-
-        try:
-            pinyin_list = self._split_pinyin(pinyin_text)
-            # 检查是否含有单字母
-            if any(len(py) == 1 for py in pinyin_list):
-                results = self._handle_single_letter(pinyin_list, top_k)
-            else:
-                raw_results = self._viterbi_decode(pinyin_list, context)
-                results = self._post_process(raw_results, top_k) if raw_results else []
-
-            # 应用用户词典
-            if self.enable_learning and pinyin_text in self.user_dict:
-                results = self._apply_user_preference(results, pinyin_text)
-
-            return results
-        except Exception as e:
-            logger.error(f"转换失败: {str(e)}")
-            return self._fallback_strategy(pinyin_text)
-        finally:
-            if results:
-                self._cache[pinyin_text] = results
-
-    def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
-        #应用用户个性化排序
-        user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
-
-        # 提升用户偏好项的得分
-        for res in results:
-            if res['text'] in user_entries:
-                res['score'] *= user_entries[res['text']] * 2  # 权重加倍
-
-        return sorted(results, key=lambda x: -x['score'])
-
-    def _heuristic_segment(self, pinyin_text: str) -> List[str]:
-        #基于常见音节的分割
-        common_syllables = {'zh', 'ch', 'sh', 'ang', 'eng', 'ing'}
-        segments = []
-        i = 0
-        while i < len(pinyin_text):
-            # 优先匹配3字符音节
-            if i + 3 <= len(pinyin_text) and pinyin_text[i:i + 3] in common_syllables:
-                segments.append(pinyin_text[i:i + 3])
-                i += 3
-            # 匹配2字符音节
-            elif i + 2 <= len(pinyin_text) and pinyin_text[i:i + 2] in common_syllables:
-                segments.append(pinyin_text[i:i + 2])
-                i += 2
-            else:
-                segments.append(pinyin_text[i])
-                i += 1
-        return segments
-
     def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
         #带上下文的多音字解码
         # 将上下文转换为拼音特征
@@ -320,35 +351,36 @@ class PinyinConverter:
             return [{"text": pinyin_text, "score": 0.0}]
 
     def _post_process(self, results: List[Dict], top_k: int) -> List[Dict]:
-        """ 改进的后处理方法 """
+        """改进的后处理：完全移除带空格的结果"""
         processed = []
         seen = set()
 
         for path in results:
-            try:
-                # 将拼音路径转换为汉字
-                hanzi_sequence = []
-                for py in path.path:
-                    # 获取该拼音最可能的汉字
-                    if py in self.hmm_params.emission_dict:
-                        char = max(self.hmm_params.emission_dict[py].items(),
-                                   key=lambda x: x[1])[0]
-                    else:
-                        # 如果拼音不在训练数据发射字典中，则使用内置拼音库的候选
-                        char = self.fallback_pinyin(py)[0][0] if self.fallback_pinyin(py) else '?'
-                    hanzi_sequence.append(char)
+            # 关键修改：直接使用原始路径生成文本
+            text = ''.join([p for p in path.path if p != ' '])  # 彻底移除空格
 
-                text = ''.join(hanzi_sequence)
-                if text not in seen:
-                    seen.add(text)
-                    processed.append({
-                        'text': text,
-                        'score': math.exp(path.score)
-                    })
-            except Exception as e:
-                logger.error(f"处理路径失败: {str(e)}")
+            if text and text not in seen:
+                seen.add(text)
+                processed.append({
+                    'text': text,
+                    'score': math.exp(path.score)
+                })
 
+        # 移除_get_segmented_results调用
         return sorted(processed, key=lambda x: -x['score'])[:top_k]
+
+    def _get_segmented_results(self, raw_results):
+        """从原始结果中提取分割组合"""
+        seg_results = []
+        for path in raw_results:
+            # 假设path.path是拼音列表，如['xi','wang']
+            seg_text = ' '.join(path.path)
+            seg_results.append({
+                'text': seg_text,
+                'score': math.exp(path.score) * 0.8  # 分割结果权重稍低
+            })
+        return seg_results
+
 class PrivacyController:
     @staticmethod
     def anonymize_input(text: str) -> str:
@@ -389,16 +421,7 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    result = converter.convert("xiwang")
-    print(result)
-    # 检查xue的发射概率
-    print("xi的候选:", converter.hmm_params.emission_dict.get('xi', {}))
-    print("wang的候选:", converter.hmm_params.emission_dict.get('wang', {}))
-    # 应输出: {'学': -1.2039, '雪': -2.3025} (近似值)
-    # 检查转移概率
-    print("希望转移概率:", converter.hmm_params.transition_dict['希'].get('望', 0))
-
-    print(converter.convert("xiwang"))  # 应优先返回"希望"
-    # 测试单字母输入
-    print(converter.convert("y"))  # 返回所有x开头的汉字
+    print(converter.convert("xiwang"))
+    print(converter.convert("xw"))
+    print(converter.convert("xiw"))
     converter.update_learning_setting(False)  # 关闭学习
