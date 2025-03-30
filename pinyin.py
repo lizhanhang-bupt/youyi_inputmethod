@@ -23,6 +23,7 @@ class PinyinConverter:
         self._init_fallback_strategy()
         self.enable_learning = enable_learning
         self.user_dict = self._load_user_dict(user_id)
+        self.valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
         self.privacy_lock = threading.Lock()  # 线程安全锁
         jieba.initialize()
         #jieba.load_userdict('pinyin_dict.txt') # 初始化jieba并加载所有拼音音节
@@ -80,62 +81,74 @@ class PinyinConverter:
             return self._heuristic_segment(pinyin_clean)
 
     def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
-        """处理含单字母的拼音输入"""
-        char_probs = defaultdict(float)
-        for syllable in pinyin_list:
-            if len(syllable) != 1:
-                continue
-            initial = syllable.lower()
-            for py in self.initial_to_pys.get(initial, []):
-                for char, log_prob in self.hmm_params.emission_dict.get(py, {}).items():
-                    if log_prob > char_probs.get(char, -float('inf')):
-                        char_probs[char] = log_prob
+        """处理首字母缩写，生成所有可能的拼音组合并解码"""
+        from itertools import product
 
-        # 转换为结果并排序
-        sorted_chars = sorted(char_probs.items(), key=lambda x: -x[1])
-        seen = set()
+        # 获取每个首字母的候选拼音（按候选汉字数量排序）
+        candidates = []
+        for initial in pinyin_list:
+            initial = initial.lower()
+            pys = self.initial_to_pys.get(initial, [])
+            # 按候选汉字数量降序排列
+            sorted_pys = sorted(pys, key=lambda py: -len(self.hmm_params.emission_dict.get(py, {})))
+            candidates.append(sorted_pys[:3])  # 每个首字母取前3候选
+
+        # 生成所有可能的拼音组合
+        all_combos = product(*candidates)
+
         results = []
-        for char, log_prob in sorted_chars:
-            if char not in seen:
-                seen.add(char)
-                results.append({'text': char, 'score': math.exp(log_prob)})
-        return results[:top_k]
+        for combo in all_combos:
+            combo = list(combo)
+            try:
+                # 使用Viterbi解码
+                raw_results = self._viterbi_decode(combo, context="")
+                if not raw_results:
+                    continue
 
+                # 处理结果
+                processed = self._post_process(raw_results, top_k)
+                for res in processed:
+                    results.append((res['text'], res['score']))
+            except Exception as e:
+                logger.error(f"解码失败: {combo} - {str(e)}")
+
+        # 合并去重并排序
+        seen = set()
+        final_results = []
+        for text, score in sorted(results, key=lambda x: -x[1]):
+            if text not in seen:
+                seen.add(text)
+                final_results.append({'text': text, 'score': score})
+
+        return final_results[:top_k]
     def _heuristic_segment(self, pinyin_text: str) -> List[str]:
-        """动态规划优先匹配最长有效音节"""
+        """动态规划优先匹配最长有效音节，失败时返回单字母列表"""
         n = len(pinyin_text)
         max_len = 6  # 最长合法拼音长度
 
-        # 初始化DP表：dp[i] = (max_score, best_segmentation)
         dp = [(-float('inf'), []) for _ in range(n + 1)]
         dp[0] = (0, [])
 
-        # 预加载所有无调拼音
-        valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
-
         for i in range(1, n + 1):
-            # 从最长可能开始尝试
             for j in range(max(0, i - max_len), i):
                 current = pinyin_text[j:i]
                 current_clean = re.sub(r'\d+', '', current)
 
-                # 计算得分：多音节优先
-                score = 0
-                if current_clean in valid_pys:
-                    score = len(current_clean) * 2  # 长度越长得分越高
+                # 关键修改：跳过无效音节
+                if current_clean not in self.valid_pys:
+                    continue
 
-                # 更新最佳路径
+                score = len(current_clean) * 2
                 if dp[j][0] + score > dp[i][0]:
                     dp[i] = (dp[j][0] + score, dp[j][1] + [current])
 
-        # 获取最佳分割
         best_seg = dp[n][1] if dp[n][1] else []
 
-        # 保底策略：整词匹配（未来扩展用）
-        if pinyin_text in valid_pys:
-            return [pinyin_text]
+        # 保底策略：返回单字母列表
+        if not best_seg:
+            return list(pinyin_text)
 
-        return best_seg if best_seg else list(pinyin_text)
+        return best_seg
 
     def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
         pinyin_text = pinyin_text.strip().replace(' ', '')
@@ -266,6 +279,63 @@ class PinyinConverter:
         # 允许空格分隔但需符合规范
         return self.pinyin_pattern.match(text.strip()) is not None
 
+    def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
+        #带上下文的多音字解码
+        # 将上下文转换为拼音特征
+        context_pinyins = lazy_pinyin(context) if context else []
+        print(context_pinyins)
+        print(pinyin_list)
+        return viterbi(
+            hmm_params=self.hmm_params,
+            observations=context_pinyins + pinyin_list, # 组合上下文
+            path_num=20,  # 获取更多候选
+            log=True
+        )
+
+    def _fallback_strategy(self, pinyin_text: str) -> List[Dict]:
+        #降级策略：整词匹配
+        try:
+            # 获取所有可能的汉字组合
+            candidates = self.fallback_pinyin(
+                pinyin_text,
+                style=Style.NORMAL,
+                heteronym=True  # 启用多音字
+            )
+            return [{"text": ''.join(c), "score": 0.5} for c in candidates]
+        except:
+            return [{"text": pinyin_text, "score": 0.0}]
+
+    def _post_process(self, results: List[Dict], top_k: int) -> List[Dict]:
+        """改进的后处理：完全移除带空格的结果"""
+        processed = []
+        seen = set()
+
+        for path in results:
+            # 关键修改：直接使用原始路径生成文本
+            text = ''.join([p for p in path.path if p != ' '])  # 彻底移除空格
+
+            if text and text not in seen:
+                seen.add(text)
+                processed.append({
+                    'text': text,
+                    'score': math.exp(path.score)
+                })
+
+        # 移除_get_segmented_results调用
+        return sorted(processed, key=lambda x: -x['score'])[:top_k]
+
+    def _get_segmented_results(self, raw_results):
+        """从原始结果中提取分割组合"""
+        seg_results = []
+        for path in raw_results:
+            # 假设path.path是拼音列表，如['xi','wang']
+            seg_text = ' '.join(path.path)
+            seg_results.append({
+                'text': seg_text,
+                'score': math.exp(path.score) * 0.8  # 分割结果权重稍低
+            })
+        return seg_results
+
     def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
         #应用用户个性化排序
         user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
@@ -324,63 +394,6 @@ class PinyinConverter:
                 self.user_dict[pinyin] = entries[:10]  # 保留前10个
                 self._save_user_dict()
 
-    def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
-        #带上下文的多音字解码
-        # 将上下文转换为拼音特征
-        context_pinyins = lazy_pinyin(context) if context else []
-        print(context_pinyins)
-        print(pinyin_list)
-        return viterbi(
-            hmm_params=self.hmm_params,
-            observations=context_pinyins + pinyin_list, # 组合上下文
-            path_num=20,  # 获取更多候选
-            log=True
-        )
-
-    def _fallback_strategy(self, pinyin_text: str) -> List[Dict]:
-        #降级策略：整词匹配
-        try:
-            # 获取所有可能的汉字组合
-            candidates = self.fallback_pinyin(
-                pinyin_text,
-                style=Style.NORMAL,
-                heteronym=True  # 启用多音字
-            )
-            return [{"text": ''.join(c), "score": 0.5} for c in candidates]
-        except:
-            return [{"text": pinyin_text, "score": 0.0}]
-
-    def _post_process(self, results: List[Dict], top_k: int) -> List[Dict]:
-        """改进的后处理：完全移除带空格的结果"""
-        processed = []
-        seen = set()
-
-        for path in results:
-            # 关键修改：直接使用原始路径生成文本
-            text = ''.join([p for p in path.path if p != ' '])  # 彻底移除空格
-
-            if text and text not in seen:
-                seen.add(text)
-                processed.append({
-                    'text': text,
-                    'score': math.exp(path.score)
-                })
-
-        # 移除_get_segmented_results调用
-        return sorted(processed, key=lambda x: -x['score'])[:top_k]
-
-    def _get_segmented_results(self, raw_results):
-        """从原始结果中提取分割组合"""
-        seg_results = []
-        for path in raw_results:
-            # 假设path.path是拼音列表，如['xi','wang']
-            seg_text = ' '.join(path.path)
-            seg_results.append({
-                'text': seg_text,
-                'score': math.exp(path.score) * 0.8  # 分割结果权重稍低
-            })
-        return seg_results
-
 class PrivacyController:
     @staticmethod
     def anonymize_input(text: str) -> str:
@@ -421,7 +434,5 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("xiwang"))
-    print(converter.convert("xw"))
-    print(converter.convert("xiw"))
+    print(converter.convert("js"))
     converter.update_learning_setting(False)  # 关闭学习
