@@ -1,78 +1,37 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QTextEdit
-from PyQt5.QtCore import Qt
+from pynput import keyboard
+from PyQt5.QtCore import pyqtSignal, QObject
+import threading
 
-class KeyboardCaptureWindow(QWidget):
+class KeyCatch(QObject):
+    key_pressed = pyqtSignal(str)  # 定义信号，用于传递捕获的键盘输入
+
     def __init__(self):
         super().__init__()
-        self.initUI()
+        self.listener = None  # 初始化为 None
+        self.inputLock = threading.Lock()
+        self.is_inserting = False
 
-    def initUI(self):
-        self.setWindowTitle('键盘捕获示例')
-        self.setGeometry(100, 100, 400, 200)
+    def on_keyboard_event(self, key):
+        if self.is_inserting:
+            return True  # 如果正在插入字符，忽略键盘事件
 
-        self.layout = QVBoxLayout()
+        try:
+            if hasattr(key, 'char') and key.char is not None:
+                char = key.char
+                if char.isalpha():  # 仅捕获字母
+                    self.key_pressed.emit(char)  # 通过信号传递捕获的字符
+                    return True  # 阻止默认输入
+        except AttributeError:
+            pass
 
-        self.label = QLabel('请按下任意键...', self)
-        self.layout.addWidget(self.label)
+        return True  # 继续监听
 
-        self.textEdit = QTextEdit(self)
-        self.textEdit.setReadOnly(True)
-        self.layout.addWidget(self.textEdit)
+    def start(self):
+        # 每次启动时创建新的 Listener 实例
+        self.listener = keyboard.Listener(on_press=self.on_keyboard_event)
+        self.listener.start()
 
-        self.setLayout(self.layout)
-
-    def keyPressEvent(self, event):
-        key = event.key()
-        key_name = self.getKeyName(key)
-        self.label.setText(f'按下的键: {key_name}')
-        self.textEdit.insertPlainText(f'{key_name}')
-
-    def getKeyName(self, key):
-        key_map = {
-            Qt.Key_A: 'A',
-            Qt.Key_B: 'B',
-            Qt.Key_C: 'C',
-            Qt.Key_D: 'D',
-            Qt.Key_E: 'E',
-            Qt.Key_F: 'F',
-            Qt.Key_G: 'G',
-            Qt.Key_H: 'H',
-            Qt.Key_I: 'I',
-            Qt.Key_J: 'J',
-            Qt.Key_K: 'K',
-            Qt.Key_L: 'L',
-            Qt.Key_M: 'M',
-            Qt.Key_N: 'N',
-            Qt.Key_O: 'O',
-            Qt.Key_P: 'P',
-            Qt.Key_Q: 'Q',
-            Qt.Key_R: 'R',
-            Qt.Key_S: 'S',
-            Qt.Key_T: 'T',
-            Qt.Key_U: 'U',
-            Qt.Key_V: 'V',
-            Qt.Key_W: 'W',
-            Qt.Key_X: 'X',
-            Qt.Key_Y: 'Y',
-            Qt.Key_Z: 'Z',
-            Qt.Key_0: '0',
-            Qt.Key_1: '1',
-            Qt.Key_2: '2',
-            Qt.Key_3: '3',
-            Qt.Key_4: '4',
-            Qt.Key_5: '5',
-            Qt.Key_6: '6',
-            Qt.Key_7: '7',
-            Qt.Key_8: '8',
-            Qt.Key_9: '9',
-        }
-        return key_map.get(key)
-
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-
-    window = KeyboardCaptureWindow()
-    window.show()
-
-    sys.exit(app.exec_())
+    def stop(self):
+        if self.listener:
+            self.listener.stop()
+            self.listener = None  # 停止后将 listener 设置为 None
