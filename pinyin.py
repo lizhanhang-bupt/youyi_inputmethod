@@ -4,6 +4,8 @@ import re
 import math
 import threading
 import json
+import pickle
+import os
 import logging
 from typing import List, Dict
 from collections import defaultdict
@@ -15,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
-        #:param user_id: 用户唯一标识（哈希处理）
-        #:param enable_learning: 是否启用学习功能（默认开启）
         self.hmm_params = self._load_enhanced_hmm('training_data.txt')  # 指定训练数据路径
         self.pinyin_pattern = re.compile(r'^[a-z]+( [a-z]+)*$')  # 更严格的拼音正则
         self._cache = {}
@@ -26,15 +26,7 @@ class PinyinConverter:
         self.valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
         self.privacy_lock = threading.Lock()  # 线程安全锁
         jieba.initialize()
-        #jieba.load_userdict('pinyin_dict.txt') # 初始化jieba并加载所有拼音音节
-        seen_pinyin = set()
-        for pinyins in pinyin_dict.pinyin_dict.values():
-            for py in pinyins:
-                py_normalized = re.sub(r'\d', '', py)
-                if py_normalized not in seen_pinyin:
-                    jieba.add_word(py_normalized, freq=1000)
-                    seen_pinyin.add(py_normalized)
-
+        jieba.load_userdict('pinyin_dict.txt')
         # 构建首字母映射
         self.initial_to_pys = defaultdict(list)
         for py in self.hmm_params.emission_dict.keys():
@@ -183,9 +175,19 @@ class PinyinConverter:
                 self._cache[pinyin_text] = results
 
     def _load_enhanced_hmm(self, train_file: str):
+        cache_path = "hmm_params.pkl"
+
+        # 尝试加载缓存
+        if os.path.exists(cache_path):
+            with open(cache_path, "rb") as f:
+                return pickle.load(f)
+
+        # 无缓存则训练并保存
         params = DefaultHmmParams()
+
         # 获取统计结果
         trans_counts, emit_counts = self._train_transition_probs(train_file)
+
         # 初始化全量汉字节点
         all_chars = set()
         for context in trans_counts:
@@ -217,8 +219,15 @@ class PinyinConverter:
                 char: math.log((count + 1e-5) / total)  # 加1平滑
                 for char, count in emit_counts[py].items()
             }
-        universal_emit = self.init_universal_emission()  # 获取拼音到汉字的初始发射概率
+
+        # 获取拼音到汉字的初始发射概率
+        universal_emit = self.init_universal_emission()
         params.emission_dict.update(universal_emit)  # 合并内置拼音汉字发射概率
+
+        # 保存到缓存文件
+        with open(cache_path, "wb") as f:
+            pickle.dump(params, f)
+
         return params
 
     def _train_transition_probs(self, file_path: str):
@@ -283,8 +292,7 @@ class PinyinConverter:
         #带上下文的多音字解码
         # 将上下文转换为拼音特征
         context_pinyins = lazy_pinyin(context) if context else []
-        print(context_pinyins)
-        print(pinyin_list)
+
         return viterbi(
             hmm_params=self.hmm_params,
             observations=context_pinyins + pinyin_list, # 组合上下文
@@ -434,5 +442,5 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("js"))
+    print(converter.convert("xiwang"))
     converter.update_learning_setting(False)  # 关闭学习
