@@ -12,8 +12,10 @@ from collections import defaultdict
 import jieba
 import hashlib
 from typing import Optional
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
@@ -283,7 +285,7 @@ class PinyinConverter:
     def _train_transition_probs(self, file_path: str):
         transition_counts = defaultdict(lambda: defaultdict(int))
         emission_counts = defaultdict(lambda: defaultdict(int))
-    #训练，数据预处理
+        # 训练，数据预处理
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 raw_text = f.read()
@@ -327,31 +329,31 @@ class PinyinConverter:
         return transition_counts, emission_counts
 
     def _init_fallback_strategy(self):
-        #初始化降级策略资源
+        # 初始化降级策略资源
         from pypinyin import pinyin
         self.fallback_pinyin = pinyin
 
     def is_valid_pinyin(self, text: str) -> bool:
-        #增强版输入验证
+        # 增强版输入验证
         if not text:
             return False
         # 允许空格分隔但需符合规范
         return self.pinyin_pattern.match(text.strip()) is not None
 
     def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
-        #带上下文的多音字解码
+        # 带上下文的多音字解码
         # 将上下文转换为拼音特征
         context_pinyins = lazy_pinyin(context) if context else []
 
         return viterbi(
             hmm_params=self.hmm_params,
-            observations=context_pinyins + pinyin_list, # 组合上下文
+            observations=context_pinyins + pinyin_list,  # 组合上下文
             path_num=20,  # 获取更多候选
             log=True
         )
 
     def _fallback_strategy(self, pinyin_text: str) -> List[Dict]:
-        #降级策略：整词匹配
+        # 降级策略：整词匹配
         try:
             # 获取所有可能的汉字组合
             candidates = self.fallback_pinyin(
@@ -376,20 +378,8 @@ class PinyinConverter:
                 })
         return sorted(processed, key=lambda x: -x['score'])[:top_k]
 
-    def _get_segmented_results(self, raw_results):
-        """从原始结果中提取分割组合"""
-        seg_results = []
-        for path in raw_results:
-            # 假设path.path是拼音列表，如['xi','wang']
-            seg_text = ' '.join(path.path)
-            seg_results.append({
-                'text': seg_text,
-                'score': math.exp(path.score) * 0.8  # 分割结果权重稍低
-            })
-        return seg_results
-
     def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
-        #应用用户个性化排序
+        # 应用用户个性化排序
         user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
 
         # 提升用户偏好项的得分
@@ -400,7 +390,7 @@ class PinyinConverter:
         return sorted(results, key=lambda x: -x['score'])
 
     def _load_user_dict(self, user_id: Optional[str]) -> dict:
-             #加载用户词典
+        # 加载用户词典
         if not user_id or not self.enable_learning:
             return defaultdict(list)
 
@@ -413,8 +403,8 @@ class PinyinConverter:
             return defaultdict(list)
 
     def _save_user_dict(self):
-        #加密保存用户词典
-        if not self.user_id or not self.enable_learning:
+        # 加密保存用户词典
+        if not self.enable_learning:
             return
 
         filename = f"user_{hashlib.sha256(self.user_id.encode()).hexdigest()[:16]}.dict"
@@ -423,7 +413,7 @@ class PinyinConverter:
                 json.dump(self.user_dict, f, ensure_ascii=False)
 
     def update_learning_setting(self, enable: bool):
-        #隐私设置开关
+        # 隐私设置开关
         with self.privacy_lock:
             old_setting = self.enable_learning
             self.enable_learning = enable
@@ -433,7 +423,7 @@ class PinyinConverter:
                 self.user_dict.clear()
 
     def _update_user_model(self, pinyin: str, selected_text: str):
-        #安全更新用户模型
+        # 安全更新用户模型
         if not self.enable_learning:
             return
 
@@ -446,15 +436,16 @@ class PinyinConverter:
                 self.user_dict[pinyin] = entries[:10]  # 保留前10个
                 self._save_user_dict()
 
+
 class PrivacyController:
     @staticmethod
     def anonymize_input(text: str) -> str:
-        #数据脱敏处理
+        # 数据脱敏处理
         return hashlib.sha256(text.encode()).hexdigest()
 
     @staticmethod
     def encrypt_data(data: dict, key: bytes) -> bytes:
-        #AES加密用户数据
+        # AES加密用户数据
         # 实现实际的加密逻辑（示例）
         from Crypto.Cipher import AES
         cipher = AES.new(key, AES.MODE_EAX)
@@ -464,7 +455,7 @@ class PrivacyController:
 
     @classmethod
     def create_consent_dialog(cls):
-        #生成隐私协议对话框
+        # 生成隐私协议对话框
         print("""
         隐私保护声明：
         1. 用户输入数据仅用于改进输入体验
@@ -474,6 +465,7 @@ class PrivacyController:
         """)
         choice = input().strip().lower()
         return choice == 'y'
+
 
 if __name__ == "__main__":
     # 用户首次使用
@@ -486,5 +478,6 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("key"))
+    print(converter.convert("keyi"))
     converter.update_learning_setting(False)  # 关闭学习
+
