@@ -12,8 +12,10 @@ from collections import defaultdict
 import jieba
 import hashlib
 from typing import Optional
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
@@ -113,66 +115,116 @@ class PinyinConverter:
                 final_results.append({'text': text, 'score': score})
 
         return final_results[:top_k]
+
     def _heuristic_segment(self, pinyin_text: str) -> List[str]:
-        """动态规划优先匹配最长有效音节，失败时返回单字母列表"""
+        max_len = 6
+        segments = []
+        i = 0
         n = len(pinyin_text)
-        max_len = 6  # 最长合法拼音长度
 
-        dp = [(-float('inf'), []) for _ in range(n + 1)]
-        dp[0] = (0, [])
+        while i < n:
+            # 优先匹配最长有效拼音
+            matched = False
+            for l in range(min(max_len, n - i), 0, -1):
+                current = pinyin_text[i:i + l]
+                clean_py = re.sub(r'\d+', '', current)
 
-        for i in range(1, n + 1):
-            for j in range(max(0, i - max_len), i):
-                current = pinyin_text[j:i]
-                current_clean = re.sub(r'\d+', '', current)
+                if clean_py in self.valid_pys:
+                    segments.append(current)
+                    i += l
+                    matched = True
+                    break
 
-                # 关键修改：跳过无效音节
-                if current_clean not in self.valid_pys:
-                    continue
+            # 未匹配时处理首字母逻辑
+            if not matched:
+                # 如果剩余部分全部是字母且长度<=3，尝试首字母组合
+                if (n - i) <= 3 and pinyin_text[i:].isalpha():
+                    segments.extend(list(pinyin_text[i:]))
+                    break
+                else:
+                    # 保底策略：单字切分
+                    segments.append(pinyin_text[i])
+                    i += 1
 
-                score = len(current_clean) * 2
-                if dp[j][0] + score > dp[i][0]:
-                    dp[i] = (dp[j][0] + score, dp[j][1] + [current])
-
-        best_seg = dp[n][1] if dp[n][1] else []
-
-        # 保底策略：返回单字母列表
-        if not best_seg:
-            return list(pinyin_text)
-
-        return best_seg
+        return segments
 
     def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
-        pinyin_text = pinyin_text.strip().replace(' ', '')
+        pinyin_text = pinyin_text.strip().replace(' ', '')  # Clean the input
         results = []
 
+        # Check if the input pinyin is valid
         if not self.is_valid_pinyin(pinyin_text):
             logger.warning(f"非法拼音输入: {pinyin_text}")
             return []
 
+        # If the result is in the cache, return it
         if pinyin_text in self._cache:
             return self._cache[pinyin_text]
 
         try:
             pinyin_list = self._split_pinyin(pinyin_text)
 
-            if all(len(py) == 1 for py in pinyin_list):
-                results = self._handle_single_letter(pinyin_list, top_k)
+            # Check for mixed mode: presence of both full pinyin and initials
+            has_full_py = any(len(py) > 1 for py in pinyin_list)  # Check for full pinyin (more than 1 character)
+            has_initial = any(len(py) == 1 for py in pinyin_list)  # Check for initials (1 character)
+
+            if has_full_py and has_initial:
+                # If both full pinyin and initials are present, handle the mixed case
+                return self._handle_mixed_case(pinyin_list, context, top_k)
+            elif all(len(py) == 1 for py in pinyin_list):
+                # If all are initials (1 character), handle as a single-letter case
+                return self._handle_single_letter(pinyin_list, top_k)
             else:
+                # Otherwise, decode with Viterbi and apply post-processing
                 raw_results = self._viterbi_decode(pinyin_list, context)
                 results = self._post_process(raw_results, top_k) if raw_results else []
 
-            if self.enable_learning and pinyin_text in self.user_dict:
-                results = self._apply_user_preference(results, pinyin_text)
-
-            return results
         except Exception as e:
-            logger.error(f"转换失败: {str(e)}")
-            return self._fallback_strategy(pinyin_text)
-        finally:
-            # Cache the results to improve future lookup
-            if results:
-                self._cache[pinyin_text] = results
+            logger.error(f"Error during conversion: {str(e)}")
+
+        if self.enable_learning and pinyin_text in self.user_dict:
+            results = self._apply_user_preference(results, pinyin_text)
+
+        return results
+
+    def _handle_mixed_case(self, pinyin_list: List[str], context: str, top_k: int) -> List[Dict]:
+        """Handles the mixed case of full pinyin and initials (e.g., 'zhong guo z')."""
+        from itertools import product
+
+        # Find the point where initials start (i.e., the first character with length 1)
+        split_idx = next((i for i, py in enumerate(pinyin_list) if len(py) == 1), len(pinyin_list))
+        full_pys = pinyin_list[:split_idx]  # Full pinyin before the initials
+        initials = pinyin_list[split_idx:]  # Initials after the full pinyin
+
+        # Decode the full pinyin part using Viterbi
+        full_results = self._viterbi_decode(full_pys, context) or []
+        candidate_texts = [''.join(res.path) for res in full_results[:3]]  # Take top 3 candidates for full pinyin
+
+        # Generate candidate pinyin for initials (limit to top 2 for each initial)
+        initial_candidates = []
+        for initial in initials:
+            initial = initial.lower()  # Convert to lowercase
+            pys = self.initial_to_pys.get(initial, [])  # Get possible full pinyin for the initial
+            initial_candidates.append(pys[:2])  # Take top 2 candidates for each initial
+
+        # Generate all combinations of full pinyin and initials
+        combined = []
+        for text in candidate_texts:
+            for combo in product(*initial_candidates):
+                new_pys = full_pys + list(combo)  # Combine full pinyin with initial candidates
+                raw = self._viterbi_decode(new_pys, context)
+                if raw:
+                    combined.extend(self._post_process(raw, top_k))  # Apply post-processing
+
+        # Deduplicate results and return the top_k results based on score
+        seen = set()
+        final = []
+        for item in sorted(combined, key=lambda x: -x['score']):
+            if item['text'] not in seen:
+                seen.add(item['text'])
+                final.append(item)
+
+        return final[:top_k]
 
     def _load_enhanced_hmm(self, train_file: str):
         cache_path = "hmm_params.pkl"
@@ -233,7 +285,7 @@ class PinyinConverter:
     def _train_transition_probs(self, file_path: str):
         transition_counts = defaultdict(lambda: defaultdict(int))
         emission_counts = defaultdict(lambda: defaultdict(int))
-    #训练，数据预处理
+        # 训练，数据预处理
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 raw_text = f.read()
@@ -277,31 +329,31 @@ class PinyinConverter:
         return transition_counts, emission_counts
 
     def _init_fallback_strategy(self):
-        #初始化降级策略资源
+        # 初始化降级策略资源
         from pypinyin import pinyin
         self.fallback_pinyin = pinyin
 
     def is_valid_pinyin(self, text: str) -> bool:
-        #增强版输入验证
+        # 增强版输入验证
         if not text:
             return False
         # 允许空格分隔但需符合规范
         return self.pinyin_pattern.match(text.strip()) is not None
 
     def _viterbi_decode(self, pinyin_list: List[str], context: str) -> List[Dict]:
-        #带上下文的多音字解码
+        # 带上下文的多音字解码
         # 将上下文转换为拼音特征
         context_pinyins = lazy_pinyin(context) if context else []
 
         return viterbi(
             hmm_params=self.hmm_params,
-            observations=context_pinyins + pinyin_list, # 组合上下文
+            observations=context_pinyins + pinyin_list,  # 组合上下文
             path_num=20,  # 获取更多候选
             log=True
         )
 
     def _fallback_strategy(self, pinyin_text: str) -> List[Dict]:
-        #降级策略：整词匹配
+        # 降级策略：整词匹配
         try:
             # 获取所有可能的汉字组合
             candidates = self.fallback_pinyin(
@@ -314,38 +366,20 @@ class PinyinConverter:
             return [{"text": pinyin_text, "score": 0.0}]
 
     def _post_process(self, results: List[Dict], top_k: int) -> List[Dict]:
-        """改进的后处理：完全移除带空格的结果"""
         processed = []
         seen = set()
-
         for path in results:
-            # 关键修改：直接使用原始路径生成文本
-            text = ''.join([p for p in path.path if p != ' '])  # 彻底移除空格
-
+            text = ''.join(path.path)
             if text and text not in seen:
                 seen.add(text)
                 processed.append({
                     'text': text,
                     'score': math.exp(path.score)
                 })
-
-        # 移除_get_segmented_results调用
         return sorted(processed, key=lambda x: -x['score'])[:top_k]
 
-    def _get_segmented_results(self, raw_results):
-        """从原始结果中提取分割组合"""
-        seg_results = []
-        for path in raw_results:
-            # 假设path.path是拼音列表，如['xi','wang']
-            seg_text = ' '.join(path.path)
-            seg_results.append({
-                'text': seg_text,
-                'score': math.exp(path.score) * 0.8  # 分割结果权重稍低
-            })
-        return seg_results
-
     def _apply_user_preference(self, results: List[Dict], pinyin: str) -> List[Dict]:
-        #应用用户个性化排序
+        # 应用用户个性化排序
         user_entries = {text: weight for text, weight in self.user_dict[pinyin]}
 
         # 提升用户偏好项的得分
@@ -356,7 +390,7 @@ class PinyinConverter:
         return sorted(results, key=lambda x: -x['score'])
 
     def _load_user_dict(self, user_id: Optional[str]) -> dict:
-             #加载用户词典
+        # 加载用户词典
         if not user_id or not self.enable_learning:
             return defaultdict(list)
 
@@ -369,8 +403,8 @@ class PinyinConverter:
             return defaultdict(list)
 
     def _save_user_dict(self):
-        #加密保存用户词典
-        if not self.user_id or not self.enable_learning:
+        # 加密保存用户词典
+        if not self.enable_learning:
             return
 
         filename = f"user_{hashlib.sha256(self.user_id.encode()).hexdigest()[:16]}.dict"
@@ -379,7 +413,7 @@ class PinyinConverter:
                 json.dump(self.user_dict, f, ensure_ascii=False)
 
     def update_learning_setting(self, enable: bool):
-        #隐私设置开关
+        # 隐私设置开关
         with self.privacy_lock:
             old_setting = self.enable_learning
             self.enable_learning = enable
@@ -389,7 +423,7 @@ class PinyinConverter:
                 self.user_dict.clear()
 
     def _update_user_model(self, pinyin: str, selected_text: str):
-        #安全更新用户模型
+        # 安全更新用户模型
         if not self.enable_learning:
             return
 
@@ -402,15 +436,16 @@ class PinyinConverter:
                 self.user_dict[pinyin] = entries[:10]  # 保留前10个
                 self._save_user_dict()
 
+
 class PrivacyController:
     @staticmethod
     def anonymize_input(text: str) -> str:
-        #数据脱敏处理
+        # 数据脱敏处理
         return hashlib.sha256(text.encode()).hexdigest()
 
     @staticmethod
     def encrypt_data(data: dict, key: bytes) -> bytes:
-        #AES加密用户数据
+        # AES加密用户数据
         # 实现实际的加密逻辑（示例）
         from Crypto.Cipher import AES
         cipher = AES.new(key, AES.MODE_EAX)
@@ -420,7 +455,7 @@ class PrivacyController:
 
     @classmethod
     def create_consent_dialog(cls):
-        #生成隐私协议对话框
+        # 生成隐私协议对话框
         print("""
         隐私保护声明：
         1. 用户输入数据仅用于改进输入体验
@@ -430,6 +465,7 @@ class PrivacyController:
         """)
         choice = input().strip().lower()
         return choice == 'y'
+
 
 if __name__ == "__main__":
     # 用户首次使用
@@ -442,5 +478,6 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("xiwang"))
+    print(converter.convert("keyi"))
     converter.update_learning_setting(False)  # 关闭学习
+
