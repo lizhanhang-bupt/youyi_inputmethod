@@ -25,14 +25,6 @@ class KeyCatch(QObject):
                 self.key_pressed.emit('\000')
             elif key == keyboard.Key.enter:
                 self.key_pressed.emit('\r')
-            elif key == keyboard.Key.page_up:
-                self.key_pressed.emit('\x21')
-            elif key == keyboard.Key.page_down:
-                self.key_pressed.emit('\x22')
-            elif key == keyboard.Key.home:
-                self.key_pressed.emit('\x24')
-            elif key == keyboard.Key.end:
-                self.key_pressed.emit('\x23')
             return True
         except AttributeError:
             pass

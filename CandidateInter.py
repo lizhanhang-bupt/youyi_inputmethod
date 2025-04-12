@@ -1,6 +1,7 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QLineEdit, QListWidgetItem
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QLineEdit, QListWidgetItem, QPushButton
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtGui import QIcon
 import win32gui
 from pynput.keyboard import Controller, Key
 from KeyCatch import KeyCatch
@@ -57,11 +58,14 @@ class CandidateWindow(QWidget):
         self.keyboard_controller = Controller()
         self.current_pinyin = ""  # 用于记录当前输入的拼音
         self.candidate_items = []  # 用于存储所有候选词
+        self.page_size = 7  # 每页显示的候选词数量
+        self.current_page = 0  # 当前页码
+        self.setWindowIcon(QIcon('InputmethodLogo.ico'))
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('输入法候选词窗口')
-        self.setGeometry(100, 100, 300, 200)
+        self.setWindowTitle('邮易输入法')
+        self.setGeometry(800, 300, 400, 500)  # 调整窗口高度以容纳按钮
 
         layout = QVBoxLayout()
 
@@ -73,13 +77,30 @@ class CandidateWindow(QWidget):
         self.listWidget.itemClicked.connect(self.insert_to_foreground_window)
         layout.addWidget(self.listWidget)
 
+        # 添加翻页按钮
+        self.prevButton = QPushButton('上一页', self)
+        self.prevButton.clicked.connect(self.go_to_previous_page)
+        layout.addWidget(self.prevButton)
+
+        self.nextButton = QPushButton('下一页', self)
+        self.nextButton.clicked.connect(self.go_to_next_page)
+        layout.addWidget(self.nextButton)
+
         self.setLayout(layout)
         self.key_catch_thread.start()
 
-    def closeEvent(self, event):
-        self.key_catch_thread.stop()
-        self.key_catch_thread.wait()
-        super().closeEvent(event)
+    def go_to_previous_page(self):
+        """翻到上一页"""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_candidates()
+
+    def go_to_next_page(self):
+        """翻到下一页"""
+        max_page = (len(self.candidate_items) - 1) // self.page_size
+        if self.current_page < max_page:
+            self.current_page += 1
+            self.update_candidates()
 
     def handle_key_press(self, char):
         self.foreground_window = win32gui.GetForegroundWindow()
@@ -89,7 +110,7 @@ class CandidateWindow(QWidget):
                 self.current_pinyin = self.current_pinyin[:-1]  # 删除最后一个字符
         elif char == '\000':
             index = 0
-            if 0 <= index < len(self.candidate_items):  # 检查索引是否有效
+            if 0 <= index < len(self.candidate_items):
                 self.insert_to_foreground_window(self.candidate_items[index])
                 return
         elif char.isdigit():  # 检测数字键
@@ -117,10 +138,13 @@ class CandidateWindow(QWidget):
         else:
             self.candidate_items = []
 
-        # 更新候选词列表
+        # 更新当前页的候选词
         self.listWidget.clear()
-        for i, token in enumerate(self.candidate_items):
-            item_text = f"{i + 1}. {token}"  # 为候选词添加编号
+        start_index = self.current_page * self.page_size
+        end_index = start_index + self.page_size
+        page_items = self.candidate_items[start_index:end_index]  # 获取当前页的候选词
+        for i, token in enumerate(page_items):
+            item_text = f"{(start_index + i) % 7 + 1}. {token}"  # 为候选词添加编号
             item = QListWidgetItem(item_text)
             self.listWidget.addItem(item)
 
