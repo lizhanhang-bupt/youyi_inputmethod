@@ -18,9 +18,22 @@ class KeyCatch(QObject):
         try:
             if hasattr(key, 'char') and key.char is not None:
                 char = key.char
-                if char.isalpha():  # 仅捕获字母
-                    self.key_pressed.emit(char)  # 通过信号传递捕获的字符
-                    return True  # 阻止默认输入
+                self.key_pressed.emit(char)  # 通过信号传递捕获的字符  
+            elif key == keyboard.Key.backspace:  # 捕获 Backspace 键
+                self.key_pressed.emit('\b')  # 传递 '\b' 表示 Backspace
+            elif key == keyboard.Key.space:
+                self.key_pressed.emit('\000')
+            elif key == keyboard.Key.enter:
+                self.key_pressed.emit('\r')
+            elif key == keyboard.Key.page_up:
+                self.key_pressed.emit('\x21')
+            elif key == keyboard.Key.page_down:
+                self.key_pressed.emit('\x22')
+            elif key == keyboard.Key.home:
+                self.key_pressed.emit('\x24')
+            elif key == keyboard.Key.end:
+                self.key_pressed.emit('\x23')
+            return True
         except AttributeError:
             pass
 

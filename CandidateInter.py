@@ -1,6 +1,6 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QLineEdit, QPushButton
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QLineEdit, QListWidgetItem
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import win32gui
 from pynput.keyboard import Controller, Key
 from KeyCatch import KeyCatch
@@ -56,6 +56,7 @@ class CandidateWindow(QWidget):
         self.foreground_window = None
         self.keyboard_controller = Controller()
         self.current_pinyin = ""  # 用于记录当前输入的拼音
+        self.candidate_items = []  # 用于存储所有候选词
         self.initUI()
 
     def initUI(self):
@@ -72,10 +73,6 @@ class CandidateWindow(QWidget):
         self.listWidget.itemClicked.connect(self.insert_to_foreground_window)
         layout.addWidget(self.listWidget)
 
-        self.processButton = QPushButton('处理文本', self)
-        self.processButton.clicked.connect(self.processText)
-        layout.addWidget(self.processButton)
-
         self.setLayout(layout)
         self.key_catch_thread.start()
 
@@ -86,31 +83,59 @@ class CandidateWindow(QWidget):
 
     def handle_key_press(self, char):
         self.foreground_window = win32gui.GetForegroundWindow()
-        self.current_pinyin += char  # 记录输入的拼音
-        self.textInput.setText(self.textInput.text() + char)
 
-    def processText(self):
-        text = self.textInput.text()
-        self.listWidget.clear()
+        if char == '\b':  # 检测 Backspace 键
+            if self.current_pinyin:
+                self.current_pinyin = self.current_pinyin[:-1]  # 删除最后一个字符
+        elif char == '\000':
+            index = 0
+            if 0 <= index < len(self.candidate_items):  # 检查索引是否有效
+                self.insert_to_foreground_window(self.candidate_items[index])
+                return
+        elif char.isdigit():  # 检测数字键
+            index = int(char) - 1  # 将数字转换为索引（从 0 开始）
+            if 0 <= index < len(self.candidate_items):  # 检查索引是否有效
+                self.insert_to_foreground_window(self.candidate_items[index])
+                return
+        else:
+            self.current_pinyin += char  # 记录输入的拼音
+
+        self.textInput.setText(self.current_pinyin)  # 更新输入框内容
+
+        # 实时处理拼音并更新候选词
+        self.update_candidates()
+        self.update_window_position()
+        self.set_window_on_top(True)
+
+    def update_candidates(self):
+        """实时更新候选词"""
+        # 调用拼音处理函数生成候选词
         if self.mode == 'pinyin':
-            self.worker = PinyinWorker(text)
-            self.worker.result_ready.connect(self.displayResults)
-            self.worker.start()
+            self.candidate_items = get_pinyin_words(self.current_pinyin)
         elif self.mode == 'predict':
-            self.displayResults(get_predict_words([text]))
+            self.candidate_items = get_predict_words([self.current_pinyin])
+        else:
+            self.candidate_items = []
 
-    def displayResults(self, tokens):
-        for token in tokens:
-            self.listWidget.addItem(token)
+        # 更新候选词列表
+        self.listWidget.clear()
+        for i, token in enumerate(self.candidate_items):
+            item_text = f"{i + 1}. {token}"  # 为候选词添加编号
+            item = QListWidgetItem(item_text)
+            self.listWidget.addItem(item)
 
-    def insert_to_foreground_window(self, item):
+    def insert_to_foreground_window(self, item_or_text):
+        if isinstance(item_or_text, QListWidgetItem):
+            text = item_or_text.text().split('. ', 1)[-1]  # 提取候选词文本
+        else:
+            text = item_or_text  # 如果直接传入候选词文本
+
         if self.foreground_window:
-            text = item.text()  # 获取点击的 Item 的文本
             win32gui.SetForegroundWindow(self.foreground_window)
 
             self.key_catch_thread.stop()
             # 删除拼音
-            for _ in range(len(self.current_pinyin)):
+            for _ in range(len(self.current_pinyin) + 1):
                 self.keyboard_controller.press(Key.backspace)
                 self.keyboard_controller.release(Key.backspace)
                 time.sleep(0.01)
@@ -124,6 +149,21 @@ class CandidateWindow(QWidget):
             self.textInput.clear()
             self.key_catch_thread.start()
 
+    def update_window_position(self):
+        if self.foreground_window:
+            caret_pos = win32gui.GetCaretPos()  # 光标相对窗口的位置
+            rect = win32gui.GetWindowRect(self.foreground_window)  # 获取窗口的绝对位置
+            x = rect[0] + caret_pos[0]
+            y = rect[1] + caret_pos[1] + 240
+            self.move(x, y)  # 移动候选词窗口到指定位置
+
+    def set_window_on_top(self, on_top):
+        if on_top:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
+        self.show()  # 重新显示窗口以应用更改
+            
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     candidateWindow = CandidateWindow(mode='pinyin')  # 或者 'predict'
