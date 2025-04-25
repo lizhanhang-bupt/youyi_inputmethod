@@ -2,3 +2,5 @@
 /best_model
 /__pycache__
 hmm_params.pkl
+/build
+/dist

@@ -22,11 +22,11 @@ def convert_file(input_path, output_path):
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        print(f"成功转换: {input_path} -> {output_path}")
+        #print(f"成功转换: {input_path} -> {output_path}")
         return True
 
     except Exception as e:
-        print(f"转换失败 {input_path}: {str(e)}")
+        #print(f"转换失败 {input_path}: {str(e)}")
         return False
 
 def batch_convert(input_path, output_path):
@@ -37,8 +37,8 @@ def batch_convert(input_path, output_path):
         for root, _, files in os.walk(input_path):
             for file in files:
                 convert_file(os.path.join(root, file), output_path)
-    else:
-        print(f"路径不存在: {input_path}")
+    #else:
+        #print(f"路径不存在: {input_path}")
 
 if __name__ == "__main__":
     # 设定输入和输出路径

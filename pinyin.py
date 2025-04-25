@@ -16,7 +16,6 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
         self.hmm_params = self._load_enhanced_hmm('training_data.txt')  # 指定训练数据路径
@@ -68,10 +67,10 @@ class PinyinConverter:
             if valid:
                 return segments
             else:
-                logger.warning(f"无效音节: {segments} -> 触发启发式分割")
+                #logger.warning(f"无效音节: {segments} -> 触发启发式分割")
                 return self._heuristic_segment(pinyin_clean)
         except Exception as e:
-            logger.error(f"Jieba分词失败: {e}")
+            #logger.error(f"Jieba分词失败: {e}")
             return self._heuristic_segment(pinyin_clean)
 
     def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
@@ -104,7 +103,8 @@ class PinyinConverter:
                 for res in processed:
                     results.append((res['text'], res['score']))
             except Exception as e:
-                logger.error(f"解码失败: {combo} - {str(e)}")
+                #logger.error(f"解码失败: {combo} - {str(e)}")
+                None
 
         # 合并去重并排序
         seen = set()
@@ -154,7 +154,7 @@ class PinyinConverter:
 
         # Check if the input pinyin is valid
         if not self.is_valid_pinyin(pinyin_text):
-            logger.warning(f"非法拼音输入: {pinyin_text}")
+            #logger.warning(f"非法拼音输入: {pinyin_text}")
             return []
 
         # If the result is in the cache, return it
@@ -180,7 +180,8 @@ class PinyinConverter:
                 results = self._post_process(raw_results, top_k) if raw_results else []
 
         except Exception as e:
-            logger.error(f"Error during conversion: {str(e)}")
+            #logger.error(f"Error during conversion: {str(e)}")
+            None
 
         if self.enable_learning and pinyin_text in self.user_dict:
             results = self._apply_user_preference(results, pinyin_text)
@@ -325,7 +326,8 @@ class PinyinConverter:
                             transition_counts[context][hanzi_list[i]] += 1
 
         except Exception as e:
-            logger.error(f"训练数据加载失败: {str(e)}")
+            #logger.error(f"训练数据加载失败: {str(e)}")
+            None
         return transition_counts, emission_counts
 
     def _init_fallback_strategy(self):
@@ -456,13 +458,13 @@ class PrivacyController:
     @classmethod
     def create_consent_dialog(cls):
         # 生成隐私协议对话框
-        print("""
-        隐私保护声明：
-        1. 用户输入数据仅用于改进输入体验
-        2. 所有数据经过加密处理
-        3. 可随时关闭学习功能
-        是否同意？(y/n)
-        """)
+        # print("""
+        # 隐私保护声明：
+        # 1. 用户输入数据仅用于改进输入体验
+        # 2. 所有数据经过加密处理
+        # 3. 可随时关闭学习功能
+        # 是否同意？(y/n)
+        # """)
         choice = input().strip().lower()
         return choice == 'y'
 
@@ -478,6 +480,6 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("keyi"))
+    #print(converter.convert("keyi"))
     converter.update_learning_setting(False)  # 关闭学习
 

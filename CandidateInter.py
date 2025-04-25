@@ -9,17 +9,6 @@ import pinyin
 import predict
 import time
 
-class PinyinWorker(QThread):
-    result_ready = pyqtSignal(list)
-
-    def __init__(self, text):
-        super().__init__()
-        self.text = text
-
-    def run(self):
-        tokens = get_pinyin_words(self.text)
-        self.result_ready.emit(tokens)
-
 def get_pinyin_words(pinyin_text):
     user_id = "user.example.com"
     converter = pinyin.PinyinConverter(user_id=user_id)
@@ -59,12 +48,12 @@ class CandidateWindow(QWidget):
         self.current_pinyin = ""  # 用于记录当前输入的拼音
         self.candidate_items = []  # 用于存储所有候选词
         self.page_size = 7  # 每页显示的候选词数量
-        self.current_page = 0  # 当前页码
-        self.setWindowIcon(QIcon('InputmethodLogo.ico'))
+        self.current_page = 0  # 当前页码        
         self.initUI()
 
     def initUI(self):
         self.setWindowTitle('邮易输入法')
+        self.setWindowIcon(QIcon('InputmethodLogo.ico'))
         self.setGeometry(800, 300, 400, 500)  # 调整窗口高度以容纳按钮
 
         layout = QVBoxLayout()
