@@ -25,6 +25,8 @@ class KeyCatch(QObject):
                 self.key_pressed.emit('\000')
             elif key == keyboard.Key.enter:
                 self.key_pressed.emit('\r')
+            elif key == keyboard.Key.shift:
+                None
             return True
         except AttributeError:
             pass
