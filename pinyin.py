@@ -6,6 +6,7 @@ import threading
 import json
 import pickle
 import os
+from functools import lru_cache
 import logging
 from typing import List, Dict
 from collections import defaultdict
@@ -15,16 +16,16 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
         self.hmm_params = self._load_enhanced_hmm('training_data.txt')  # 指定训练数据路径
         self.pinyin_pattern = re.compile(r'^[a-z]+( [a-z]+)*$')  # 更严格的拼音正则
         self._cache = {}
-        self._init_fallback_strategy()
         self.enable_learning = enable_learning
         self.user_dict = self._load_user_dict(user_id)
+        additional_pys = {'zh', 'ch', 'sh'}
         self.valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
+        self.valid_pys.update(additional_pys)  # 合并新增声母
         self.privacy_lock = threading.Lock()  # 线程安全锁
         self.py_trie = self._build_pinyin_trie(self.valid_pys)  # 拼音Trie树
         jieba.initialize()
@@ -33,17 +34,17 @@ class PinyinConverter:
         self.initial_to_pys = defaultdict(list)
         for py in self.hmm_params.emission_dict.keys():
             initial = self._get_initial(py)
-            self.initial_to_pys[initial].append(py)
+            # 新增：将zh/ch/sh作为独立键存储
+            if initial in {'zh', 'ch', 'sh'}:
+                self.initial_to_pys[initial].append(py)
+            else:
+                self.initial_to_pys[initial[0]].append(py)  # 单字母生母保持原逻辑
 
     def _get_initial(self, py: str) -> str:
-        """获取拼音的首字母"""
-        if py.startswith('zh'):
-            return 'z'
-        elif py.startswith('ch'):
-            return 'c'
-        elif py.startswith('sh'):
-            return 's'
-        return py[0] if py else ''
+        """获取拼音的首字母（优化版，区分zh/ch/sh）"""
+        if py.startswith(('zh', 'ch', 'sh')):
+            return py[:2]  # 返回完整生母
+        return py[0] if py else ''  # 其他情况取首字母
 
     def init_universal_emission(self):
         universal_emit = defaultdict(lambda: defaultdict(float))
@@ -64,6 +65,7 @@ class PinyinConverter:
             node['__end__'] = True  # 标记拼音结束
         return trie
 
+    @lru_cache(maxsize=5000)
     def _split_pinyin(self, pinyin_text: str) -> List[str]:
         pinyin_clean = pinyin_text.replace(' ', '')
         try:
@@ -72,7 +74,7 @@ class PinyinConverter:
 
             # 验证逻辑：检查无调拼音是否存在于发射词典
             valid = all(
-                re.sub(r'\d+', '', seg) in self.hmm_params.emission_dict  # 关键修正
+                re.sub(r'\d+', '', seg) in self.valid_pys  # 使用扩展后的valid_pys
                 for seg in segments
             )
             if valid:
@@ -161,11 +163,20 @@ class PinyinConverter:
                 segments.append(pinyin_text[i:i + actual_length])
                 i += actual_length
             else:
-                # 未匹配时处理逻辑保持不变
-                if (n - i) <= 3 and pinyin_text[i:].isalpha():
-                    segments.extend(list(pinyin_text[i:]))
-                    break
+                # 未匹配时处理逻辑：仅当字符长度为1且非zh/ch/sh时，作为单字母处理
+                current_char = pinyin_text[i]
+                if len(current_char) == 1 and current_char not in {'zh', 'ch', 'sh'}:
+                    segments.append(current_char)
+                    i += 1
                 else:
+                    # 处理2字符声母（zh/ch/sh）作为独立拼音
+                    if i <= len(pinyin_text) - 2:
+                        two_char = pinyin_text[i:i + 2].lower()
+                        if two_char in {'zh', 'ch', 'sh'}:
+                            segments.append(two_char)
+                            i += 2
+                            continue
+                    # 其他情况 fallback 到原逻辑
                     segments.append(pinyin_text[i])
                     i += 1
 
@@ -350,11 +361,6 @@ class PinyinConverter:
             logger.error(f"训练数据加载失败: {str(e)}")
         return transition_counts, emission_counts
 
-    def _init_fallback_strategy(self):
-        # 初始化降级策略资源
-        from pypinyin import pinyin
-        self.fallback_pinyin = pinyin
-
     def is_valid_pinyin(self, text: str) -> bool:
         # 增强版输入验证
         if not text:
@@ -500,7 +506,7 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("xi"))
+    print(converter.convert("ch"))
 
     converter.update_learning_setting(False)  # 关闭学习
 
