@@ -12,9 +12,9 @@ from collections import defaultdict
 import jieba
 import hashlib
 from typing import Optional
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class PinyinConverter:
     def __init__(self, user_id: Optional[str] = None, enable_learning: bool = True):
@@ -26,6 +26,7 @@ class PinyinConverter:
         self.user_dict = self._load_user_dict(user_id)
         self.valid_pys = {re.sub(r'\d+', '', py) for py in self.hmm_params.emission_dict}
         self.privacy_lock = threading.Lock()  # 线程安全锁
+        self.py_trie = self._build_pinyin_trie(self.valid_pys)  # 拼音Trie树
         jieba.initialize()
         jieba.load_userdict('pinyin_dict.txt')
         # 构建首字母映射
@@ -53,6 +54,16 @@ class PinyinConverter:
                 universal_emit[py][hanzi] = math.log(weight)
         return universal_emit
 
+    def _build_pinyin_trie(self, pinyin_set: set[str]) -> dict:
+        """构建拼音的Trie树结构"""
+        trie = {}
+        for py in pinyin_set:
+            node = trie
+            for char in py:
+                node = node.setdefault(char, {})
+            node['__end__'] = True  # 标记拼音结束
+        return trie
+
     def _split_pinyin(self, pinyin_text: str) -> List[str]:
         pinyin_clean = pinyin_text.replace(' ', '')
         try:
@@ -67,10 +78,10 @@ class PinyinConverter:
             if valid:
                 return segments
             else:
-                #logger.warning(f"无效音节: {segments} -> 触发启发式分割")
+                logger.warning(f"无效音节: {segments} -> 触发启发式分割")
                 return self._heuristic_segment(pinyin_clean)
         except Exception as e:
-            #logger.error(f"Jieba分词失败: {e}")
+            logger.error(f"Jieba分词失败: {e}")
             return self._heuristic_segment(pinyin_clean)
 
     def _handle_single_letter(self, pinyin_list: List[str], top_k: int) -> List[Dict]:
@@ -103,8 +114,7 @@ class PinyinConverter:
                 for res in processed:
                     results.append((res['text'], res['score']))
             except Exception as e:
-                #logger.error(f"解码失败: {combo} - {str(e)}")
-                None
+                logger.error(f"解码失败: {combo} - {str(e)}")
 
         # 合并去重并排序
         seen = set()
@@ -117,44 +127,57 @@ class PinyinConverter:
         return final_results[:top_k]
 
     def _heuristic_segment(self, pinyin_text: str) -> List[str]:
-        max_len = 6
         segments = []
         i = 0
         n = len(pinyin_text)
+        max_len = 6  # 单个拼音最大长度限制
 
         while i < n:
-            # 优先匹配最长有效拼音
-            matched = False
-            for l in range(min(max_len, n - i), 0, -1):
-                current = pinyin_text[i:i + l]
-                clean_py = re.sub(r'\d+', '', current)
+            # 使用Trie树进行匹配
+            current = pinyin_text[i:i + max_len]
+            clean_current = re.sub(r'\d+', '', current)  # 去除声调数字
 
-                if clean_py in self.valid_pys:
-                    segments.append(current)
-                    i += l
-                    matched = True
+            # 在Trie树中查找最长匹配
+            matched_py = ""
+            node = self.py_trie
+            for j, char in enumerate(clean_current):
+                if char not in node:
                     break
+                node = node[char]
+                if '__end__' in node:  # 发现有效拼音
+                    matched_py = clean_current[:j + 1]
 
-            # 未匹配时处理首字母逻辑
-            if not matched:
-                # 如果剩余部分全部是字母且长度<=3，尝试首字母组合
+            if matched_py:
+                # 计算原始字符串中的匹配长度（考虑声调数字）
+                actual_length = 0
+                alpha_count = 0
+                for char in current:
+                    actual_length += 1
+                    if char.isalpha():
+                        alpha_count += 1
+                    if alpha_count >= len(matched_py):
+                        break
+
+                segments.append(pinyin_text[i:i + actual_length])
+                i += actual_length
+            else:
+                # 未匹配时处理逻辑保持不变
                 if (n - i) <= 3 and pinyin_text[i:].isalpha():
                     segments.extend(list(pinyin_text[i:]))
                     break
                 else:
-                    # 保底策略：单字切分
                     segments.append(pinyin_text[i])
                     i += 1
 
         return segments
 
-    def convert(self, pinyin_text: str, context: str = "", top_k: int = 30) -> List[Dict]:
+    def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
         pinyin_text = pinyin_text.strip().replace(' ', '')  # Clean the input
         results = []
 
         # Check if the input pinyin is valid
         if not self.is_valid_pinyin(pinyin_text):
-            #logger.warning(f"非法拼音输入: {pinyin_text}")
+            logger.warning(f"非法拼音输入: {pinyin_text}")
             return []
 
         # If the result is in the cache, return it
@@ -180,8 +203,7 @@ class PinyinConverter:
                 results = self._post_process(raw_results, top_k) if raw_results else []
 
         except Exception as e:
-            #logger.error(f"Error during conversion: {str(e)}")
-            None
+            logger.error(f"Error during conversion: {str(e)}")
 
         if self.enable_learning and pinyin_text in self.user_dict:
             results = self._apply_user_preference(results, pinyin_text)
@@ -189,7 +211,6 @@ class PinyinConverter:
         return results
 
     def _handle_mixed_case(self, pinyin_list: List[str], context: str, top_k: int) -> List[Dict]:
-        """Handles the mixed case of full pinyin and initials (e.g., 'zhong guo z')."""
         from itertools import product
 
         # Find the point where initials start (i.e., the first character with length 1)
@@ -326,8 +347,7 @@ class PinyinConverter:
                             transition_counts[context][hanzi_list[i]] += 1
 
         except Exception as e:
-            #logger.error(f"训练数据加载失败: {str(e)}")
-            None
+            logger.error(f"训练数据加载失败: {str(e)}")
         return transition_counts, emission_counts
 
     def _init_fallback_strategy(self):
@@ -458,13 +478,13 @@ class PrivacyController:
     @classmethod
     def create_consent_dialog(cls):
         # 生成隐私协议对话框
-        # print("""
-        # 隐私保护声明：
-        # 1. 用户输入数据仅用于改进输入体验
-        # 2. 所有数据经过加密处理
-        # 3. 可随时关闭学习功能
-        # 是否同意？(y/n)
-        # """)
+        print("""
+        隐私保护声明：
+        1. 用户输入数据仅用于改进输入体验
+        2. 所有数据经过加密处理
+        3. 可随时关闭学习功能
+        是否同意？(y/n)
+        """)
         choice = input().strip().lower()
         return choice == 'y'
 
@@ -480,6 +500,7 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    #print(converter.convert("keyi"))
+    print(converter.convert("xi"))
+
     converter.update_learning_setting(False)  # 关闭学习
 
