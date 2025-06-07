@@ -288,7 +288,7 @@ class PinyinConverter:
 
         # 处理转移概率（二元+三元）
         for context, next_chars in trans_counts.items():
-            total = sum(next_chars.values()) + 1e-5  # 平滑处理
+            total = sum(next_chars.values()) + 1e-4  # 平滑处理
             if isinstance(context, tuple):  # 三元上下文
                 params.transition_dict.setdefault(context, {})
                 for char, count in next_chars.items():
@@ -299,9 +299,9 @@ class PinyinConverter:
 
         # 处理发射概率
         for py in emit_counts:
-            total = sum(emit_counts[py].values()) + 1e-5
+            total = sum(emit_counts[py].values()) + 1e-4
             params.emission_dict[py] = {
-                char: math.log((count + 1e-5) / total)  # 加1平滑
+                char: math.log((count + 1e-4) / total)  # 加1平滑
                 for char, count in emit_counts[py].items()
             }
 
@@ -506,7 +506,7 @@ if __name__ == "__main__":
         converter = PinyinConverter(user_id=None)
 
     # 正常使用流程
-    print(converter.convert("ch"))
+    print(converter.convert("shuju"))
 
     converter.update_learning_setting(False)  # 关闭学习
 
