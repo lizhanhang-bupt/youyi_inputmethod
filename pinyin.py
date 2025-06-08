@@ -182,7 +182,7 @@ class PinyinConverter:
 
         return segments
 
-    def convert(self, pinyin_text: str, context: str = "", top_k: int = 5) -> List[Dict]:
+    def convert(self, pinyin_text: str, context: str = "", top_k: int = 20) -> List[Dict]:
         pinyin_text = pinyin_text.strip().replace(' ', '')  # Clean the input
         results = []
 

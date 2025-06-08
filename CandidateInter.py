@@ -83,6 +83,9 @@ class CandidateWindow(QWidget):
         if self.current_page > 0:
             self.current_page -= 1
             self.update_candidates()
+            # 保持输入窗口焦点
+            if self.foreground_window:
+                win32gui.SetForegroundWindow(self.foreground_window)
 
     def go_to_next_page(self):
         """翻到下一页"""
@@ -90,27 +93,53 @@ class CandidateWindow(QWidget):
         if self.current_page < max_page:
             self.current_page += 1
             self.update_candidates()
+            # 保持输入窗口焦点
+            if self.foreground_window:
+                win32gui.SetForegroundWindow(self.foreground_window)
 
     def handle_key_press(self, char):
         self.foreground_window = win32gui.GetForegroundWindow()
+        reset_page = False
 
         if char == '\b':  # 检测 Backspace 键
             if self.current_pinyin:
                 self.current_pinyin = self.current_pinyin[:-1]  # 删除最后一个字符
+                reset_page = True
         elif char == '\000':
             index = 0
-            if 0 <= index < len(self.candidate_items):
+            start_index = self.current_page * self.page_size
+            if start_index <= index < min(start_index + self.page_size, len(self.candidate_items)):
                 self.insert_to_foreground_window(self.candidate_items[index])
                 return
-        elif char.isdigit():  # 检测数字键
-            index = int(char) - 1  # 将数字转换为索引（从 0 开始）
-            if 0 <= index < len(self.candidate_items):  # 检查索引是否有效
-                self.insert_to_foreground_window(self.candidate_items[index])
-                return
+        elif char.isdigit():
+            num = int(char)
+            if 1 <= num <= self.page_size:
+                start_index = self.current_page * self.page_size
+                index = start_index + num - 1
+                if index < len(self.candidate_items):
+                    self.insert_to_foreground_window(self.candidate_items[index])
+                    return
+        elif char.isalpha():
+            self.current_pinyin += char.lower()
+            reset_page = True
         else:
-            self.current_pinyin += char  # 记录输入的拼音
+            if self.foreground_window:
+                win32gui.SetForegroundWindow(self.foreground_window)
+                self.key_catch_thread.stop()
+                for _ in range(len(self.current_pinyin)):
+                    self.keyboard_controller.press(Key.backspace)
+                    self.keyboard_controller.release(Key.backspace)
+                    time.sleep(0.01)
+                self.current_pinyin = ""
+                self.textInput.clear()
+                self.key_catch_thread.start()
+            return
 
-        self.textInput.setText(self.current_pinyin)  # 更新输入框内容
+        self.textInput.setText(self.current_pinyin)
+
+        # 只有拼音内容变化时才重置页码
+        if reset_page:
+            self.current_page = 0
 
         # 实时处理拼音并更新候选词
         self.update_candidates()
